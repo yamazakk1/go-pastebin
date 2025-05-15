@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"html"
 	"net"
 	"net/http"
 	"os"
@@ -67,88 +68,130 @@ func (s *Server) Start(httpAddr string) error {
 // HTTP обработчики
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	html := `<!DOCTYPE html>
+<html lang="ru">
+<head>
+	<meta charset="UTF-8">
+	<title>Go Pastebin</title>
+	<style>
+		body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+		textarea { width: 100%%; height: 200px; margin: 10px 0; }
+		button { padding: 10px 15px; background: #4CAF50; color: white; border: none; cursor: pointer; }
+		.paste { background: #f5f5f5; padding: 15px; margin: 10px 0; border-left: 3px solid #4CAF50; white-space: pre-wrap; }
+	</style>
+</head>
+<body>
+	<h1>Go Pastebin</h1>
+	<form action="/create" method="post" accept-charset="utf-8">
+		<textarea name="text" placeholder="Введите текст здесь..." required></textarea><br>
+		<label>Срок действия: 
+			<select name="expires">
+				<option value="1h">1 час</option>
+				<option value="24h" selected>1 день</option>
+				<option value="168h">1 неделя</option>
+			</select>
+		</label>
+		<button type="submit">Создать</button>
+	</form>
+</body>
+</html>`
+
+	fmt.Fprint(w, html)
+}
+
+func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/plain")
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "Welcome to Pastebin\n\n")
-	fmt.Fprintf(w, "Total pastes: %d\n", app.GetPasteCount())
-	fmt.Fprintf(w, "Endpoints:\n")
-	fmt.Fprintf(w, "POST /create - Create new paste\n")
-	fmt.Fprintf(w, "GET /paste/{slug} - View paste\n")
-	fmt.Fprintf(w, "Parameters for /create:\n")
-	fmt.Fprintf(w, "  text: (required) Paste content\n")
-	fmt.Fprintf(w, "  expires: (optional) Expiration time (e.g. 1h, 30m)\n")
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Ошибка обработки формы", http.StatusBadRequest)
+		return
+	}
+
+	text := r.PostFormValue("text")
+	if text == "" {
+		http.Error(w, "Текст не может быть пустым", http.StatusBadRequest)
+		return
+	}
+
+	expires, _ := time.ParseDuration(r.PostFormValue("expires"))
+	if expires <= 0 {
+		expires = 24 * time.Hour
+	}
+
+	slug, err := app.CreatePaste(text, expires)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	html := fmt.Sprintf(`<!DOCTYPE html>
+<html lang="ru">
+<head>
+	<meta charset="UTF-8">
+	<title>Паста создана</title>
+</head>
+<body>
+	<h1>Паста успешно создана!</h1>
+	<div class="paste">
+		<p>Ссылка: <a href="/paste/%s">/paste/%s</a></p>
+		<p><a href="/">Создать новую</a></p>
+	</div>
+</body>
+</html>`, slug, slug)
+
+	fmt.Fprint(w, html)
 }
 
 func (s *Server) handlePaste(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
 	slug := strings.TrimPrefix(r.URL.Path, "/paste/")
 	if slug == "" {
-		http.Error(w, "Slug is required", http.StatusBadRequest)
+		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
 
 	text, err := app.GetPaste(slug)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		// ... обработка ошибки
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/plain")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(text))
-}
+	// Экранируем HTML-символы и заменяем переносы строк на <br>
+	escapedText := html.EscapeString(text)
+	formattedText := strings.ReplaceAll(escapedText, "\n", "<br>")
 
-func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		w.Header().Set("Content-Type", "text/plain")
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "To create paste, send POST request with form data:\n")
-		fmt.Fprintf(w, "text=Your+text+here\n")
-		fmt.Fprintf(w, "expires=1h (optional)\n")
-		return
-
-	case http.MethodPost:
-		text := r.FormValue("text")
-		expiresStr := r.FormValue("expires")
-
-		if text == "" {
-			http.Error(w, "Text is required", http.StatusBadRequest)
-			return
+	html := fmt.Sprintf(`<!DOCTYPE html>
+<html lang="ru">
+<head>
+	<meta charset="UTF-8">
+	<title>Паста %s</title>
+	<style>
+		.paste-content {
+			white-space: pre-wrap; /* Сохраняем переносы строк */
+			font-family: monospace;
+			background: #f5f5f5;
+			padding: 15px;
+			border-radius: 5px;
+			overflow-wrap: break-word;
 		}
+	</style>
+</head>
+<body>
+	<h1>Просмотр пасты</h1>
+	<div class="paste-content">%s</div>
+	<p><a href="/">Создать новую</a></p>
+</body>
+</html>`, slug, formattedText)
 
-		expires, err := time.ParseDuration(expiresStr)
-		if err != nil || expires <= 0 {
-			expires = 24 * time.Hour // дефолтное значение
-		}
-
-		slug, err := app.CreatePaste(text, expires)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "text/plain")
-		w.WriteHeader(http.StatusCreated)
-		fmt.Fprintf(w, "Paste created successfully!\n")
-		fmt.Fprintf(w, "Slug: %s\n", slug)
-		fmt.Fprintf(w, "View URL: /paste/%s\n", slug)
-		return
-
-	default:
-		w.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
-		w.WriteHeader(http.StatusMethodNotAllowed)
-	}
+	fmt.Fprint(w, html)
 }
 
 // Работа консоли на фоне
